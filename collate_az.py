@@ -10,30 +10,60 @@ import dateutil
 from unipath import Path
 
 
-def finddupe(a):
-    return [x for x, y in collections.Counter(a).items() if y > 1]
+def _build_wells():
+    rows = [(str(i), r) for i, r in enumerate('CDEFGHIJKLMN', 3)]
+    columns = [str(i) for i in range(3, 22+1)]
+    rc = list(itertools.product(rows, columns))
+    data = {
+        'WellName': [r[1] + c for r, c in rc],
+        'Row': [r[0] for r, c in rc],
+        'Column': [c for r, c in rc],
+    }
+    return pd.DataFrame(data)
 
+loc_columns = ['WellName', 'Row', 'Column']
+plate_invariant_columns = [
+    'ScreenName', 'ScreenID', 'PlateName', 'PlateID', 'MeasurementDate',
+    'MeasurementID', 'Timepoint', 'Plane'
+]
 
-def fixplateintegrity(df):
-    # FIXME this should merge with a full list of wellnames rather than
-    # iterate, as the current code will mishandle the case where both replicate
-    # wells are missing.
-    letters = 'CDEFGHIJKLMN'
-    numbers = [str(i) for i in range(3, 22+1)]
-    for indx, wellname in enumerate(itertools.product(letters,numbers)):
-        wellname = wellname[0] + wellname[1]
-        if wellname != df['WellName'][indx]:
-            print ('        !! Missing data for well %s; copying from'
-                   ' replicate' % wellname)
-            if indx % 2 == 0:
-	        df = pd.concat([df.iloc[0:indx+1], df.iloc[indx:]], axis=0)
-            else:
-	        df = pd.concat([df.iloc[0:indx], df.iloc[indx-1:]], axis=0)
-            df = df.reset_index(drop=True)
+def fixplateintegrity(df, _wells=_build_wells()):
+    """Fill in any missing rows from the corresponding technical replicate."""
+    # FIXME: This could be more robust if done after merging with the layout,
+    # since we could either find the replicate well directly or at least verify
+    # our assumptions. (This experiment lays the technical replicates out
+    # vertically, but others do it horizontally, and theoretically one could
+    # use complete randomization.)
+    df = df.merge(_wells, how='right')
+    missing_idx = df.ScreenName.isnull().nonzero()[0]
+    for idx in missing_idx:
+        loc = df.iloc[idx][loc_columns]
+        row = int(loc.Row)
+        # Select the technical replicate -- they come in vertical pairs.
+        if row % 2 == 0:
+            rep_row = row - 1
+        else:
+            rep_row = row + 1
+        rep_indexer = (df.Row == str(rep_row)) & (df.Column == loc.Column)
+        rep_data = df[rep_indexer].iloc[0].copy()
+        # Check the final (data) column since we'd never touch that one in the
+        # "both replicates missing" case.
+        if pd.isnull(rep_data.iloc[-1]):
+            # Both replicates are missing - copy invariant columns from any old
+            # row and leave data columns as nan.
+            invariant_data = df.iloc[0][plate_invariant_columns]
+            rep_data[plate_invariant_columns] = invariant_data
+            print ("        !! Missing data for well %s; replicate also"
+                   " missing! Inserting null values." % loc.WellName)
+        else:
+            rep_wellname = rep_data.WellName
+            print ("        ** Missing data for well %s; copying from"
+                   " replicate in %s" % (loc.WellName, rep_wellname))
+        rep_data[loc_columns] = loc
+        df.iloc[idx] = rep_data
+
     return df
 
-def subdirs(path):
-    return [p for p in path.listdir() if p.isdir()]
 
 PROJECT_NAME = 'az'
 
@@ -43,6 +73,8 @@ badpaths = (
      '/struct_max_features[6026113].result.1.csv'),
     ('160821_HCI_AZ_Rep2[4226]/Sim_000004[15713]/2016-08-22T065459-0400[19349]'
      '/funct_max_features[6086183].result.1.csv'),
+    ('160830_HCI_AZ_Rep3[4258]/Sim_000004[15829]/2016-08-31T092540-0400[19495]'
+     '/funct_max_features[6109798].result.1.csv'),
 )
 
 input_path = Path(__file__).parent.child('input', PROJECT_NAME)
@@ -50,7 +82,7 @@ output_path = Path(__file__).parent.child('output', PROJECT_NAME)
 assert input_path.exists()
 output_path.mkdir()
 
-zippaths = [p for p in input_path.listdir() if p.ext == '.zip' and 'Rep3' not in p]
+zippaths = [p for p in input_path.listdir() if p.ext == '.zip']
 
 df = {}
 plate_df_r1 = []
@@ -72,6 +104,8 @@ for pl_df, pl_name in zip((plate_df_r1, plate_df_r234), platefilelist):
 
 
 print "\n\nReading data files\n==========\n"
+
+seen_scans = {}
 
 for zpath in zippaths:
     print "Scanning", zpath
@@ -98,9 +132,10 @@ for zpath in zippaths:
                            if p.startswith(plate_path) and p.endswith('.csv')
                            and p not in badpaths]
 
-        num_timepoints = len(timepoint_paths)
-        assert num_timepoints == 8, ("Expected 8 timepoint .csv files, found %d"
-                                     % num_timepoints)
+        expected_tps = 8 if replicate != '3' else 7
+        num_tps = len(timepoint_paths)
+        assert num_tps == expected_tps, ("Expected %s timepoint .csv files, found"
+                                         " %d" % (expected_tps, num_tps))
 
         # Here we rely on having an ISO8601 timestamp in the paths so that
         # lexically sorting them puts them in time-course order. We'll still
@@ -112,7 +147,20 @@ for zpath in zippaths:
 
         for csvpath in timepoint_paths:
 
-            timestamp = csvpath.split('/')[2][:22]
+            # Ensure we don't have duplicate files for the same plate +
+            # timepoint (apparently some scans were processed more than once).
+            # badpaths is supposed to contain all of the duplicates for
+            # filtering above, and this code makes sure we didn't miss any.
+            scan_name = csvpath.split('/')[2]
+            timestamp, scan_id = re.findall(r'^([^[]+)\[(\d+)\]$', scan_name)[0]
+            full_path = plate_path + csvpath
+            if scan_id in seen_scans:
+                other_path = seen_scans[scan_id]
+                msg = ("duplicate scan ID %s found in filenames:"
+                       "\n    %s\n    %s" % (scan_id, other_path, full_path))
+                raise Exception(msg)
+            seen_scans[scan_id] = full_path
+
             t = dateutil.parser.parse(timestamp)
             delta_t = t - t0
 
@@ -142,7 +190,7 @@ for zpath in zippaths:
                 pl['ReplicateNumber'] = replicate
 
                 assert len(tempdf) == len(pl), "design-experiment mismatch"
-                tempdf = pl.merge(tempdf, on=['WellName', 'Row', 'Column'])
+                tempdf = pl.merge(tempdf, on=loc_columns)
                 assert len(tempdf) == len(pl), "design merge failure"
 
             df[replicate][sim].append(tempdf)
@@ -174,7 +222,7 @@ for replicate, rdf in df.items():
 
     print "Replicate", replicate
 
-    final = None
+    data = []
 
     for panel_a, panel_b in (('Sim_000001', 'Sim_000003'),
                              ('Sim_000002', 'Sim_000004')):
@@ -183,17 +231,18 @@ for replicate, rdf in df.items():
 
             print "    Timepoint %d: %s / %s" % (tp, panel_a, panel_b)
             df2.columns = [x + '_2' for x in df2.columns.values]
-            tempdf = pd.concat([df1, df2], axis=1)
+            tempdf = df1.merge(df2, left_on='WellName', right_on='WellName_2')
+            assert len(tempdf) == len(df1) == len(df2), "panel length mismatch"
             tempdf = drop_duplicate_columns(tempdf)
-            if final is None:
-                final = tempdf
-            else:
-                assert (tempdf.columns == final.columns).all(), "column mismatch"
-                final = final.append(tempdf)
+            data.append(tempdf)
+            # Trivially succeeds on first iteration, of course.
+            assert (tempdf.columns == data[0].columns).all(), "column mismatch"
 
+    final = data[0].append(data[1:])
     final = final.sort_values(['MeasurementDate', 'PlateName'])
     final = final.reset_index(drop=True)
-    assert final.shape == (3840, 691), "final merged table has wrong size"
+    assert final.shape[0] in (240*2*8, 240*2*7), "wrong number of rows"
+    assert final.shape[1] == 691, "wrong number of columns"
 
     final_path = output_path.child('Replicate_'+replicate+'.csv')
     print "    Writing output to", final_path
