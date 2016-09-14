@@ -1,3 +1,4 @@
+from __future__ import division
 import os
 import glob
 import re
@@ -10,6 +11,13 @@ import dateutil
 from unipath import Path
 
 
+loc_columns = ['WellName', 'Row', 'Column']
+plate_invariant_columns = [
+    'ScreenName', 'ScreenID', 'PlateName', 'PlateID', 'MeasurementDate',
+    'MeasurementID', 'Timepoint', 'Plane'
+]
+
+
 def _build_wells():
     rows = [(str(i), r) for i, r in enumerate('CDEFGHIJKLMN', 3)]
     columns = [str(i) for i in range(3, 22+1)]
@@ -20,12 +28,6 @@ def _build_wells():
         'Column': [c for r, c in rc],
     }
     return pd.DataFrame(data)
-
-loc_columns = ['WellName', 'Row', 'Column']
-plate_invariant_columns = [
-    'ScreenName', 'ScreenID', 'PlateName', 'PlateID', 'MeasurementDate',
-    'MeasurementID', 'Timepoint', 'Plane'
-]
 
 def fixplateintegrity(df, _wells=_build_wells()):
     """Fill in any missing rows from the corresponding technical replicate."""
@@ -65,6 +67,14 @@ def fixplateintegrity(df, _wells=_build_wells()):
     return df
 
 
+def round_timedelta(delta, granularity):
+    """Rounds a timedelta to a given granularity in seconds."""
+    s = delta.total_seconds()
+    rounded_seconds = (s + granularity / 2) // granularity * granularity
+    return datetime.timedelta(0, rounded_seconds)
+
+
+
 PROJECT_NAME = 'az'
 
 # List of duplicate analysis result files, to be skipped.
@@ -82,7 +92,8 @@ output_path = Path(__file__).parent.child('output', PROJECT_NAME)
 assert input_path.exists()
 output_path.mkdir()
 
-zippaths = [p for p in input_path.listdir() if p.ext == '.zip']
+zippaths = [p for p in input_path.listdir()
+            if p.ext == '.zip' and 'Rep' in p.name]
 
 df = {}
 plate_df_r1 = []
@@ -144,6 +155,7 @@ for zpath in zippaths:
         timepoint_paths = sorted(timepoint_paths)
         timestamp0 = timepoint_paths[0].split('/')[2][:22]
         t0 = dateutil.parser.parse(timestamp0)
+        seen_timepoints = []
 
         for csvpath in timepoint_paths:
 
@@ -164,9 +176,14 @@ for zpath in zippaths:
             t = dateutil.parser.parse(timestamp)
             delta_t = t - t0
 
-            delta_t_minutes_s = delta_t.total_seconds() // 60 * 60
-            delta_t_minutes = datetime.timedelta(seconds=delta_t_minutes_s)
-            print '   %s @ %s' % (delta_t_minutes, csvpath.split('/', 2)[-1])
+            hour = 60 * 60
+            # Experimental timepoints are supposed to be a multiple of 4 hours.
+            delta_t_4h = round_timedelta(delta_t, 4 * hour)
+            exp_timepoint = int(delta_t_4h.total_seconds() / hour)
+            actual_timepoint = delta_t.total_seconds() / hour
+            print '   %sh (%.1fh) @ %s' % (exp_timepoint, actual_timepoint,
+                                           csvpath.split('/', 2)[-1])
+            seen_timepoints.append(exp_timepoint)
             # Specify 'str' as dtype to prevent any parsing of floats etc. to
             # preserve original values exactly.
             tempdf = pd.read_csv(zfile.open(csvpath), encoding='utf-8', dtype='str')
@@ -174,10 +191,19 @@ for zpath in zippaths:
             assert len(tempdf) == 240, ('Expected 240 rows, found %d'
                                         % len(tempdf))
 
-            #For sim1 or sim2
-            #Add a time column
-            #Add a replicate column, but ignore the sim, we will join sim1 and 3 and sim will not be needed
 
+            # Insert actual timepoint column.
+            tempdf.insert(0, 'ActualTimepointHours', actual_timepoint)
+            # Verify timestamp column matches file path.
+            unique_mds = tempdf.MeasurementDate.unique()
+            assert len(unique_mds) == 1, "multiple timestamps, expected one"
+            data_timestamp = dateutil.parser.parse(tempdf.MeasurementDate[0])
+            assert data_timestamp == t, "timestamp mismatch"
+
+            # For sim1 or sim2:
+            # Add a replicate column, but ignore the sim, we will join sim1 and
+            # 3 and sim will not be needed.
+            # Add a time column.
             # Prepend experimental design and replicate number to Structural
             # Panel plates; Functional Panel plates will be merged later.
             if sim == 'Sim_000001' or sim == 'Sim_000002':
@@ -188,12 +214,20 @@ for zpath in zippaths:
                     pl = plate_df[1]
                 pl = pl.copy()
                 pl['ReplicateNumber'] = replicate
+                pl['ExperimentalTimepointHours'] = exp_timepoint
 
                 assert len(tempdf) == len(pl), "design-experiment mismatch"
                 tempdf = pl.merge(tempdf, on=loc_columns)
                 assert len(tempdf) == len(pl), "design merge failure"
 
             df[replicate][sim].append(tempdf)
+
+        assert seen_timepoints[:7] == range(0, 24 + 1, 4), "wrong timepoint"
+        # Three of the replicates have an extra but varying last timepoint.
+        last_tps = {'1': 48, '2': 72, '4': 48}
+        if replicate in last_tps:
+            assert seen_timepoints[7] == last_tps[replicate], "wrong timepoint"
+
 
 #Ok all read in, now go through each replicate (1 to 4)
 #For each sim1 item, join it to corresponding sim3 item, this is replicate X, compounds Y-Z, 7 time points, full set of struct and func features
@@ -239,10 +273,10 @@ for replicate, rdf in df.items():
             assert (tempdf.columns == data[0].columns).all(), "column mismatch"
 
     final = data[0].append(data[1:])
-    final = final.sort_values(['MeasurementDate', 'PlateName'])
+    final = final.sort_values(['ExperimentalTimepointHours', 'PlateName'])
     final = final.reset_index(drop=True)
     assert final.shape[0] in (240*2*8, 240*2*7), "wrong number of rows"
-    assert final.shape[1] == 691, "wrong number of columns"
+    assert final.shape[1] == 694, "wrong number of columns"
 
     final_path = output_path.child('Replicate_'+replicate+'.csv')
     print "    Writing output to", final_path
