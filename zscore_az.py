@@ -9,7 +9,15 @@ assert input_path.exists()
 output_path.mkdir()
 
 def control_row_idx(df):
-    return (df.Column == 21) | (df.Column == 22)
+    # Originally the controls were designed to be all of columns 21 and 22, but
+    # due to possible edge effects this was changed to column 21 and the top
+    # half of columns 11 and 13.
+    #
+    # return (df.Column == 21) | (df.Column == 22)
+    return (
+        (df.Column == 21)
+        | (((df.Column == 11) | (df.Column == 13)) & (df.Row <= 8))
+    )
 
 csvpaths = [p for p in input_path.listdir() if p.ext == '.csv']
 
