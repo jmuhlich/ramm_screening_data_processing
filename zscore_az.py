@@ -8,41 +8,44 @@ output_path = unipath.Path(__file__).parent.child('output', PROJECT_NAME)
 assert input_path.exists()
 output_path.mkdir()
 
+def control_row_idx(df):
+    return (df.Column == 21) | (df.Column == 22)
+
 csvpaths = [p for p in input_path.listdir() if p.ext == '.csv']
 
 for path in csvpaths:
 
     print 'Reading', path
-    df = pd.read_csv(path, float_precision='high')
+    rep = pd.read_csv(path, float_precision='high')
 
-    data_col_selector = df.columns.str.contains(r'^(?:Nuclei|dead cells|Spots)')
-    assert len(data_col_selector.nonzero()[0]) == 660, "wrong # of columns"
+    data_col_idx = rep.columns.str.contains(r'^(?:Nuclei|dead cells|Spots)')
+    assert len(data_col_idx.nonzero()[0]) == 660, "wrong # of columns"
 
-    rep = df[df.ExperimentalTimepointHours <= 24].copy()
+    rep = rep[rep.ExperimentalTimepointHours <= 24].copy()
     assert len(rep) == 3360, "wrong # replicate rows"
 
-    rep_data = rep.loc[:, data_col_selector]
-    rep_controls = rep_data[((rep.Column==21) | (rep.Column==22))]
+    rep_data = rep.loc[:, data_col_idx]
+    rep_controls = rep.loc[control_row_idx, data_col_idx]
     rep_controls_std = rep_controls.std()
 
     for meas_id in rep.MeasurementID.unique():
 
         print "    measurement %d" % meas_id
 
-        pl_row_selector = (rep.MeasurementID == meas_id)
-        assert len(pl_row_selector.nonzero()[0]) == 240, "wrong # plate rows"
+        pl_row_idx = (rep.MeasurementID == meas_id)
+        assert len(pl_row_idx.nonzero()[0]) == 240, "wrong # plate rows"
 
-        pl = rep.loc[pl_row_selector]
-        pl_data = pl.loc[:, data_col_selector]
-        pl_controls = pl_data[((pl.Column==21) | (pl.Column==22))]
+        pl = rep.loc[pl_row_idx]
+        pl_data = pl.loc[:, data_col_idx]
+        pl_controls = pl.loc[control_row_idx, data_col_idx]
         pl_controls_mean = pl_controls.mean()
 
         pl_data = (pl_data - pl_controls_mean) / rep_controls_std
 
-        rep.loc[pl_row_selector, data_col_selector] = pl_data
+        rep.loc[pl_row_idx, data_col_idx] = pl_data
 
-    replicate = re.findall(r'_(\d)\.csv', path.name)[0]
-    dest_name = 'Replicate_%s_zscore_norm.csv' % replicate
+    rep_number = re.findall(r'_(\d)\.csv', path.name)[0]
+    dest_name = 'Replicate_%s_zscore_norm.csv' % rep_number
     dest_path = output_path.child(dest_name)
     print 'Writing', dest_path
     with open(dest_path, 'w') as fp:
