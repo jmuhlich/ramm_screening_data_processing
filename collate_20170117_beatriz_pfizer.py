@@ -242,8 +242,8 @@ for replicate, rdf in df.items():
 
     data = []
 
-    for panel_a, panel_b in (('sim_000001', 'sim_000003'),
-                             ('sim_000002', 'sim_000004')):
+    for panel_a, panel_b in (('Sim_000001', 'Sim_000003'),
+                             ('Sim_000002', 'Sim_000004')):
 
         for tp, (df1, df2) in enumerate(zip(rdf[panel_a], rdf[panel_b])):
 

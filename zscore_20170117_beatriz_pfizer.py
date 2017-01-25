@@ -9,7 +9,11 @@ assert input_path.exists()
 output_path.mkdir()
 
 def control_row_idx(df):
-    return df.pert_iname == '0.5_DMSO'
+    # DMSO treatment is in many more wells than this, but it was decided
+    # to only use cols 8-14, rows 5-6 (a more central part of the plate)
+    # due to edge effects.
+    return ((8 <= df.Column) & (df.Column <= 14)
+            & (5 <= df.Row) & (df.Row <= 6))
 
 csvpaths = [p for p in input_path.listdir() if p.ext == '.csv']
 
