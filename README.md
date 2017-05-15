@@ -65,3 +65,11 @@ Started this one from scratch, making better use of Pandas. Collation and
 normalization are combined into a single, shorter script.
 
 * process_20170415_hptec_oat1.py
+
+20170506_hptec_oat1_randomized
+------------------------------
+
+BC. Similar to above, but replicates each have different platemaps. One
+replicate at one timepoint is missing.
+
+* process_20170506_hptec_oat1_randomized.py
