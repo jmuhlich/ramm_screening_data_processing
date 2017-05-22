@@ -73,3 +73,11 @@ BC. Similar to above, but replicates each have different platemaps. One
 replicate at one timepoint is missing.
 
 * process_20170506_hptec_oat1_randomized.py
+
+20170516_hptec_oat1_two_panel
+-----------------------------
+
+Similar to above, but 3 replicates, 6 timepoints (7 for OAT1 cells), and a
+return to the older two-panel design (each sample is split across two plates,
+with different antibodies and imaging features). To address panels, merge
+horizontally as follows: SIM1+SIM4 / SIM2+SIM5 / SIM3+SIM6.
