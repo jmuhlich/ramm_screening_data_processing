@@ -62,7 +62,7 @@ data_func = pd.DataFrame()
 # We'll just use the keys in this OrderedDict as an ordered set.
 #columns = OrderedDict()
 for p in data_paths:
-    new_data = pd.read_csv(str(p), float_precision='high',
+    new_data = pd.read_csv(str(p), float_precision='high', encoding='utf-8',
                            parse_dates=['MeasurementDate'])
     assert len(new_data.PlateName.unique()) == 1, 'Multiple plates in file'
     assert new_data.PlateName.str.contains(r'Sim_00000[1-6]').all(), \
